@@ -44,9 +44,35 @@ for _k, _v in {
 # ───────────────────────────────
 # 상수
 # ───────────────────────────────
-API_KEY    = "9171f7ffd72f4ffcb62f"
 SERVICE_ID = "I1250"
-BASE_URL   = f"http://openapi.foodsafetykorea.go.kr/api/{API_KEY}/{SERVICE_ID}/json"
+_API_KEYS  = [
+    "9171f7ffd72f4ffcb62f",   # 키 1
+    "7270692908c74bccaebc",   # 키 2
+]
+DAILY_LIMIT = 2000            # 키당 일일 한도
+
+class _KeyPool:
+    """라운드로빈으로 두 키를 교대 사용 → 실질 일일 4,000회"""
+    def __init__(self, keys):
+        self.keys  = keys
+        self._idx  = 0
+    def next(self) -> str:
+        k = self.keys[self._idx % len(self.keys)]
+        self._idx += 1
+        return k
+    def base_url(self) -> str:
+        return f"http://openapi.foodsafetykorea.go.kr/api/{self.next()}/{SERVICE_ID}/json"
+    @property
+    def total_limit(self) -> int:
+        return DAILY_LIMIT * len(self.keys)
+
+if "_key_pool" not in st.session_state:
+    st.session_state["_key_pool"] = _KeyPool(_API_KEYS)
+
+_pool = st.session_state["_key_pool"]
+
+# 하위 호환 (caption 등에서 사용)
+API_KEY  = _API_KEYS[0]
 
 # ── Gemini API 키 (st.secrets에서 자동 로드) ──
 def _get_gemini_key() -> str:
@@ -101,8 +127,9 @@ def fetch_food_data(food_type: str, top_n: int = 100, max_pages: int = 100):
     전체 DB를 max_pages 페이지 스캔 → PRMS_DT 정렬 → 최신 top_n 반환.
     DB 인덱스 ≠ 보고일자 순서이므로 전체 스캔 후 날짜 정렬이 필수.
     """
-    # probe: total_count 확인
-    data, err = _safe_get(f"{BASE_URL}/1/1")
+    # probe: total_count 확인 (키1 고정 — probe는 1회만)
+    _probe_url = f"http://openapi.foodsafetykorea.go.kr/api/{_API_KEYS[0]}/{SERVICE_ID}/json/1/1"
+    data, err = _safe_get(_probe_url)
     if err:
         return None, err, 0, 0
     if SERVICE_ID not in data:
@@ -120,7 +147,7 @@ def fetch_food_data(food_type: str, top_n: int = 100, max_pages: int = 100):
     while cursor > 0 and pages_done < max_pages:
         p_s = max(1, cursor - page_size + 1)
         p_e = cursor
-        d, err = _safe_get(f"{BASE_URL}/{p_s}/{p_e}")
+        d, err = _safe_get(f"{_pool.base_url()}/{p_s}/{p_e}")
         if err:
             return None, err, total, pages_done
 
@@ -431,7 +458,34 @@ with st.sidebar:
         "스캔 페이지 수", 10, 300, 100, step=10,
         help="1페이지 = DB 1,000건\n대형 유형(혼합음료 등) → 200 이상 권장\n소형 유형 → 50~100",
     )
-    st.caption(f"DB 최근 {max_pages*1000:,}건 스캔 / API {max_pages+1}회")
+
+    # 유형 수 계산 (복수 비교 대응)
+    if mode == "📋 단일 유형 조회":
+        _n_types = len(FOOD_TYPES[category]) if category_all else 1
+    else:
+        _n_types = max(len(selected_types), 1) if selected_types else 1
+
+    _api_calls   = (_n_types * (max_pages + 1))   # 유형별 (probe1 + scan)
+    _pct         = round(_api_calls / (_pool.total_limit) * 100, 1)
+    _sec_per_page = 0.4                            # 실측 기준 (요청 0.2s + 처리)
+    _est_sec     = int(_n_types * max_pages * _sec_per_page)
+    _est_min     = _est_sec // 60
+    _est_rem     = _est_sec % 60
+
+    if _est_min > 0:
+        _time_str = f"약 {_est_min}분 {_est_rem}초"
+    else:
+        _time_str = f"약 {_est_sec}초"
+
+    # 소진율에 따른 색상 경고
+    if _pct >= 80:
+        st.error(f"⚠️ API {_api_calls}회 사용 · 일일 한도 **{_pct}% 소진**")
+    elif _pct >= 50:
+        st.warning(f"⚡ API {_api_calls}회 사용 · 일일 한도 {_pct}% 소진")
+    else:
+        st.info(f"📊 API {_api_calls}회 사용 · 일일 한도 {_pct}% 소진")
+
+    st.caption(f"⏱ 예상 소요시간: {_time_str}  |  DB {max_pages*1000:,}건 스캔")
 
     st.markdown("---")
 
@@ -449,8 +503,7 @@ with st.sidebar:
     run = st.button("🚀 조회 실행", use_container_width=True, type="primary")
     st.markdown("---")
     st.caption(f"📡 식품안전나라 I1250 API")
-    st.caption(f"🔑 {API_KEY[:8]}...")
-    st.caption("⚠️ 일 2,000회 호출 제한")
+    st.caption(f"🔑 키 {len(_API_KEYS)}개 · 일 {_pool.total_limit:,}회 한도")
     st.caption("🤖 AI분석: Gemini (secrets)")
 
 
@@ -460,8 +513,11 @@ with st.sidebar:
 if run:
     if mode == "📋 단일 유형 조회":
         if category_all:
-            with st.spinner(f"{category} 전체 조회 중…"):
-                rows, smsgs = fetch_multiple(FOOD_TYPES[category], count, max_pages)
+            _prog_box2 = st.empty()
+            with _prog_box2.container():
+                st.info(f"📡 **{category} 전체** 조회 중…  |  예상 소요: {_time_str}  |  API {_api_calls}회 ({_pct}% 소진 예정)")
+            rows, smsgs = fetch_multiple(FOOD_TYPES[category], count, max_pages)
+            _prog_box2.empty()
             st.session_state["status_msgs"] = smsgs
             if rows:
                 df = to_df(rows)
@@ -478,8 +534,34 @@ if run:
                 st.session_state["result_df"]  = pd.DataFrame()
                 st.session_state["result_msg"] = "조회 결과 없음"
         else:
-            with st.spinner(f"'{food_type}' 조회 중… (DB 스캔)"):
-                rows, msg, total, _ = fetch_food_data(food_type, top_n=count, max_pages=max_pages)
+            _prog_box = st.empty()
+            with _prog_box.container():
+                st.info(f"📡 **'{food_type}'** 조회 중…  |  예상 소요: {_time_str}  |  API {_api_calls}회 ({_pct}% 소진 예정)")
+                _pbar = st.progress(0, text="DB 스캔 시작…")
+
+            import threading, time as _time
+
+            _state = {"done": False, "result": None}
+
+            def _run():
+                _state["result"] = fetch_food_data(food_type, top_n=count, max_pages=max_pages)
+                _state["done"] = True
+
+            _t = threading.Thread(target=_run, daemon=True)
+            _t.start()
+
+            _elapsed = 0
+            _total_est = max(_api_calls * 0.4, 1)
+            while not _state["done"]:
+                _elapsed += 0.5
+                _prog_val = min(int(_elapsed / _total_est * 95), 95)
+                _remaining = max(int(_total_est - _elapsed), 0)
+                _pbar.progress(_prog_val, text=f"스캔 중… 경과 {int(_elapsed)}초 / 잔여 약 {_remaining}초")
+                _time.sleep(0.5)
+
+            _pbar.progress(100, text="완료!")
+            _prog_box.empty()
+            rows, msg, total, _ = _state["result"]
             if rows is None:
                 st.error(f"❌ {msg}")
             elif not rows:
@@ -500,7 +582,11 @@ if run:
         if not selected_types:
             st.warning("품목유형을 1개 이상 선택하세요.")
         else:
+            _prog_box3 = st.empty()
+            with _prog_box3.container():
+                st.info(f"📡 복수 유형 조회 중…  |  예상 소요: {_time_str}  |  API {_api_calls}회 ({_pct}% 소진 예정)")
             rows, smsgs = fetch_multiple(selected_types, per_type, max_pages)
+            _prog_box3.empty()
             st.session_state["status_msgs"] = smsgs
             if rows:
                 df = to_df(rows)
