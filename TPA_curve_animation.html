@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TPA Curve Animation — Texture Profile Analysis</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#fff;color:#333;display:flex;justify-content:center;padding:24px}
+.wrap{max-width:900px;width:100%}
+h1{font-size:18px;font-weight:500;margin-bottom:12px;color:#222}
+.controls{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+button{padding:6px 18px;border:1px solid #bbb;border-radius:6px;background:#fff;cursor:pointer;font-size:13px}
+button:hover{background:#f5f5f5}
+.time-label,.speed-label{font-size:13px;color:#888}
+input[type=range]{width:100px;accent-color:#3266ad}
+.main{display:flex;gap:16px;flex-wrap:wrap}
+.chart-wrap{flex:1;min-width:420px}
+canvas{border:1px solid #e5e5e5;border-radius:8px}
+.probe-wrap{width:150px;display:flex;flex-direction:column;align-items:center;gap:4px}
+.probe-title{font-size:13px;color:#888;font-weight:500}
+.phase-label{font-size:12px;color:#888;text-align:center;min-height:32px}
+.legend{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px;font-size:12px;color:#777}
+.legend span{display:flex;align-items:center;gap:4px}
+.legend i{width:10px;height:10px;border-radius:2px;display:inline-block}
+.info-box{margin-top:12px;padding:10px 14px;background:#f8f8f8;border-radius:8px;font-size:13px;color:#666;min-height:40px;line-height:1.6}
+@media(prefers-color-scheme:dark){
+  body{background:#1a1a1a;color:#ddd}
+  h1{color:#eee}
+  button{background:#2a2a2a;border-color:#555;color:#ddd}
+  button:hover{background:#333}
+  canvas{border-color:#333}
+  .info-box{background:#252525;color:#aaa}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Texture Profile Analysis (TPA) — animated curve</h1>
+  <div class="controls">
+    <button id="playBtn">Play</button>
+    <button id="resetBtn">Reset</button>
+    <span class="time-label" id="timeLabel">0.0 s / 8.0 s</span>
+    <input type="range" id="speedSlider" min="0.5" max="3" step="0.5" value="1">
+    <span class="speed-label" id="speedLabel">1x</span>
+  </div>
+  <div class="main">
+    <div class="chart-wrap">
+      <canvas id="chartCanvas" width="700" height="420" style="width:100%"></canvas>
+    </div>
+    <div class="probe-wrap">
+      <span class="probe-title">Probe view</span>
+      <canvas id="probeCanvas" width="150" height="260"></canvas>
+      <div class="phase-label" id="phaseLabel"></div>
+    </div>
+  </div>
+  <div class="legend" id="legend"></div>
+  <div class="info-box" id="infoBox">Press Play to start the Texture Profile Analysis animation.</div>
+</div>
+<script>
+const isDark=matchMedia('(prefers-color-scheme:dark)').matches;
+const C={
+  bg:isDark?'#1a1a1a':'#ffffff',
+  grid:isDark?'rgba(255,255,255,0.07)':'rgba(0,0,0,0.06)',
+  axis:isDark?'rgba(255,255,255,0.5)':'rgba(0,0,0,0.45)',
+  text:isDark?'rgba(255,255,255,0.7)':'rgba(0,0,0,0.6)',
+  curve:'#3266ad',
+  fill1:isDark?'rgba(50,102,173,0.25)':'rgba(50,102,173,0.12)',
+  neg:isDark?'rgba(226,75,74,0.25)':'rgba(226,75,74,0.12)',
+  hard:'#E24B4A',comp:'#3266ad',adh:'#D85A30',coh:'#1D9E75',
+  spring:'#7F77DD',gum:'#BA7517',
+  probe:isDark?'#888':'#666',
+  sample:isDark?'#5DCAA5':'#1D9E75',
+  sampleLight:isDark?'rgba(93,202,165,0.3)':'rgba(29,158,117,0.15)',
+};
+
+function buildCurve(){
+  const pts=[];const N=800;
+  for(let i=0;i<=N;i++){
+    const t=(i/N)*8;let f=0;
+    if(t<0.1)f=0;
+    else if(t<1.8){const p=(t-0.1)/1.7;f=350*Math.pow(Math.sin(p*Math.PI/2),0.7);}
+    else if(t<2.6){const p=(t-1.8)/0.8;f=350*Math.pow(1-p,0.5);}
+    else if(t<3.4){const p=(t-2.6)/0.8;f=-100*Math.sin(p*Math.PI);}
+    else if(t<4.2)f=0;
+    else if(t<5.8){const p=(t-4.2)/1.6;f=280*Math.pow(Math.sin(p*Math.PI/2),0.7);}
+    else if(t<6.4){const p=(t-5.8)/0.6;f=280*Math.pow(1-p,0.5);}
+    else if(t<7.2){const p=(t-6.4)/0.8;f=-80*Math.sin(p*Math.PI);}
+    else f=0;
+    pts.push({t,f});
+  }
+  return pts;
+}
+
+const curve=buildCurve();
+const canvas=document.getElementById('chartCanvas');
+const ctx=canvas.getContext('2d');
+const pCanvas=document.getElementById('probeCanvas');
+const pCtx=pCanvas.getContext('2d');
+
+const margin={top:30,right:30,bottom:50,left:60};
+const W=canvas.width-margin.left-margin.right;
+const H=canvas.height-margin.top-margin.bottom;
+function tToX(t){return margin.left+(t/8)*W;}
+function fToY(f){return margin.top+H*(1-(f+150)/500);}
+
+const annotations=[
+  {id:'hard',tStart:1.0,label:'Hardness',desc:'Peak force in 1st compression (350 g). Indicates resistance to deformation.',color:C.hard},
+  {id:'comp',tStart:1.8,label:'Compressibility',desc:'Area under 1st compression curve. Total work to deform the sample.',color:C.comp},
+  {id:'adh',tStart:2.8,label:'Adhesiveness',desc:'Negative area after 1st compression. Force needed to pull probe away from sample.',color:C.adh},
+  {id:'spring',tStart:4.2,label:'Springiness',desc:'Distance ratio (d₂/d₁). How well the sample recovers height after 1st compression.',color:C.spring},
+  {id:'coh',tStart:5.8,label:'Cohesiveness',desc:'Area₂ / Area₁ ratio. Internal bond strength — how well the sample holds together after first compression.',color:C.coh},
+  {id:'gum',tStart:6.5,label:'Gumminess',desc:'Hardness × Cohesiveness. Energy to disintegrate a semi-solid food to swallowable state.',color:C.gum},
+];
+
+let animT=0,playing=false,speed=1,rafId=null,lastTs=null;
+const playBtn=document.getElementById('playBtn');
+const resetBtn=document.getElementById('resetBtn');
+const speedSlider=document.getElementById('speedSlider');
+const timeLabel=document.getElementById('timeLabel');
+const speedLabel=document.getElementById('speedLabel');
+const infoBox=document.getElementById('infoBox');
+const phaseLabel=document.getElementById('phaseLabel');
+const legendEl=document.getElementById('legend');
+
+legendEl.innerHTML=annotations.map(a=>`<span><i style="background:${a.color}"></i>${a.label}</span>`).join('');
+
+function getPhase(t){
+  if(t<0.1)return'Idle';if(t<1.8)return'1st compression ↓';if(t<2.6)return'1st decompression ↑';
+  if(t<3.4)return'Adhesion pullback';if(t<4.2)return'Rest period';if(t<5.8)return'2nd compression ↓';
+  if(t<6.4)return'2nd decompression ↑';if(t<7.2)return'Adhesion pullback';return'Complete';
+}
+
+function getProbeY(t){
+  if(t<0.1)return 0;
+  if(t<1.8){const p=(t-0.1)/1.7;return Math.pow(Math.sin(p*Math.PI/2),0.7);}
+  if(t<2.6){const p=(t-1.8)/0.8;return Math.pow(1-p,0.5);}
+  if(t<3.4){const p=(t-2.6)/0.8;return-0.15*Math.sin(p*Math.PI);}
+  if(t<4.2)return 0;
+  if(t<5.8){const p=(t-4.2)/1.6;return 0.8*Math.pow(Math.sin(p*Math.PI/2),0.7);}
+  if(t<6.4){const p=(t-5.8)/0.6;return 0.8*Math.pow(1-p,0.5);}
+  if(t<7.2){const p=(t-6.4)/0.8;return-0.1*Math.sin(p*Math.PI);}
+  return 0;
+}
+
+function getActiveInfo(t){let last=null;for(const a of annotations)if(t>=a.tStart)last=a;return last;}
+
+function drawChart(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle=C.bg;ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.strokeStyle=C.grid;ctx.lineWidth=0.5;
+  for(let f=-100;f<=350;f+=50){const y=fToY(f);ctx.beginPath();ctx.moveTo(margin.left,y);ctx.lineTo(margin.left+W,y);ctx.stroke();}
+  for(let t=0;t<=8;t+=1){const x=tToX(t);ctx.beginPath();ctx.moveTo(x,margin.top);ctx.lineTo(x,margin.top+H);ctx.stroke();}
+  ctx.strokeStyle=C.axis;ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(margin.left,margin.top);ctx.lineTo(margin.left,margin.top+H);ctx.stroke();
+  ctx.beginPath();ctx.moveTo(margin.left,fToY(0));ctx.lineTo(margin.left+W,fToY(0));ctx.stroke();
+  ctx.fillStyle=C.text;ctx.font='11px sans-serif';ctx.textAlign='right';ctx.textBaseline='middle';
+  for(let f=-100;f<=350;f+=50)ctx.fillText(f,margin.left-8,fToY(f));
+  ctx.textAlign='center';ctx.textBaseline='top';
+  for(let t=0;t<=8;t+=1)ctx.fillText(t,tToX(t),margin.top+H+8);
+  ctx.fillStyle=C.text;ctx.font='12px sans-serif';ctx.textAlign='center';
+  ctx.fillText('Time (sec)',margin.left+W/2,canvas.height-10);
+  ctx.save();ctx.translate(14,margin.top+H/2);ctx.rotate(-Math.PI/2);ctx.fillText('Force (g)',0,0);ctx.restore();
+
+  const drawnPts=curve.filter(p=>p.t<=animT);
+  if(drawnPts.length<2)return;
+
+  ctx.beginPath();ctx.moveTo(tToX(drawnPts[0].t),fToY(0));
+  for(const p of drawnPts)ctx.lineTo(tToX(p.t),fToY(p.f));
+  ctx.lineTo(tToX(drawnPts[drawnPts.length-1].t),fToY(0));ctx.closePath();
+  ctx.fillStyle=C.fill1;ctx.fill();
+
+  const negPts=drawnPts.filter(p=>p.f<0);
+  if(negPts.length>0){
+    ctx.beginPath();ctx.moveTo(tToX(negPts[0].t),fToY(0));
+    for(const p of negPts)ctx.lineTo(tToX(p.t),fToY(p.f));
+    ctx.lineTo(tToX(negPts[negPts.length-1].t),fToY(0));ctx.closePath();
+    ctx.fillStyle=C.neg;ctx.fill();
+  }
+
+  ctx.beginPath();ctx.moveTo(tToX(drawnPts[0].t),fToY(drawnPts[0].f));
+  for(let i=1;i<drawnPts.length;i++)ctx.lineTo(tToX(drawnPts[i].t),fToY(drawnPts[i].f));
+  ctx.strokeStyle=C.curve;ctx.lineWidth=2.5;ctx.stroke();
+
+  const last=drawnPts[drawnPts.length-1];
+  ctx.beginPath();ctx.arc(tToX(last.t),fToY(last.f),4,0,Math.PI*2);ctx.fillStyle=C.curve;ctx.fill();
+
+  for(const a of annotations){
+    if(animT<a.tStart)continue;
+    const fade=Math.min(1,(animT-a.tStart)/0.3);ctx.globalAlpha=fade;
+
+    if(a.id==='hard'){
+      const x=tToX(1.8),y=fToY(350);
+      ctx.beginPath();ctx.setLineDash([4,3]);ctx.strokeStyle=a.color;ctx.lineWidth=1.5;
+      ctx.moveTo(x,y);ctx.lineTo(x+60,y-20);ctx.stroke();ctx.setLineDash([]);
+      ctx.fillStyle=a.color;ctx.font='bold 12px sans-serif';ctx.textAlign='left';
+      ctx.fillText('Hardness = 350 g',x+64,y-22);
+      ctx.beginPath();ctx.moveTo(margin.left,y);ctx.lineTo(margin.left+W,y);
+      ctx.strokeStyle=a.color;ctx.lineWidth=0.8;ctx.setLineDash([6,4]);ctx.stroke();ctx.setLineDash([]);
+    }
+    if(a.id==='comp'&&animT>=2.0){
+      ctx.fillStyle=a.color;ctx.font='11px sans-serif';ctx.textAlign='center';
+      ctx.fillText('Area₁',tToX(1.0),fToY(200));
+    }
+    if(a.id==='adh'&&animT>=3.0){
+      const cx=tToX(3.0),cy=fToY(-55);
+      ctx.fillStyle=a.color;ctx.font='bold 12px sans-serif';ctx.textAlign='center';
+      ctx.fillText('Adhesiveness',cx,cy+30);
+      ctx.font='10px sans-serif';ctx.fillText('(negative area)',cx,cy+44);
+    }
+    if(a.id==='spring'&&animT>=4.5){
+      const x1=tToX(0.1),x2=tToX(1.8),x3=tToX(4.2);const ys=fToY(-130);
+      ctx.strokeStyle=a.color;ctx.lineWidth=1.5;
+      ctx.beginPath();ctx.moveTo(x1,ys);ctx.lineTo(x2,ys);ctx.stroke();
+      ctx.fillStyle=a.color;ctx.font='10px sans-serif';ctx.textAlign='center';
+      ctx.fillText('d₁',(x1+x2)/2,ys-6);
+      const endX=tToX(Math.min(animT,5.8));
+      if(animT>=4.2){
+        ctx.beginPath();ctx.moveTo(x3,ys+14);ctx.lineTo(endX,ys+14);ctx.stroke();
+        ctx.fillText('d₂',(x3+endX)/2,ys+8);
+        ctx.font='bold 11px sans-serif';ctx.fillText('Springiness = d₂/d₁',(x3+endX)/2,ys+28);
+      }
+    }
+    if(a.id==='coh'&&animT>=5.9){
+      ctx.fillStyle=a.color;ctx.font='11px sans-serif';ctx.textAlign='center';
+      ctx.fillText('Area₂',tToX(5.0),fToY(160));
+      ctx.font='bold 11px sans-serif';ctx.fillText('Cohesiveness = Area₂/Area₁',tToX(4.5),fToY(350)+16);
+    }
+    if(a.id==='gum'&&animT>=6.8){
+      ctx.fillStyle=a.color;ctx.font='bold 11px sans-serif';ctx.textAlign='center';
+      ctx.fillText('Gumminess = Hardness × Cohesiveness',tToX(4.5),fToY(350)+32);
+    }
+    ctx.globalAlpha=1;
+  }
+
+  const stages=[{t1:0,t2:1.8,label:'Stage 1'},{t1:1.8,t2:2.6,label:'Stage 2'},{t1:2.6,t2:4.2,label:'Stage 3'},{t1:4.2,t2:5.8,label:'Stage 4'},{t1:5.8,t2:8,label:'Stage 5'}];
+  ctx.font='10px sans-serif';ctx.textAlign='center';ctx.fillStyle=C.text;
+  for(const s of stages)if(animT>=s.t1)ctx.fillText(s.label,(tToX(Math.min(s.t2,animT))+tToX(s.t1))/2,margin.top+H+24);
+}
+
+function drawProbe(){
+  const w=pCanvas.width,h=pCanvas.height;
+  pCtx.clearRect(0,0,w,h);pCtx.fillStyle=C.bg;pCtx.fillRect(0,0,w,h);
+  const sampleBaseY=200,sampleH=50,sampleW=80,probeW=40,probeH=60;
+  const plateY=sampleBaseY+sampleH;
+  pCtx.fillStyle=isDark?'#444':'#ccc';pCtx.fillRect((w-100)/2,plateY,100,6);
+
+  const compression=getProbeY(animT);
+  const squish=Math.max(0,compression)*sampleH*0.7;
+  const stretch=Math.min(0,compression)*sampleH*0.3;
+  const sTop=sampleBaseY-stretch+squish;const sH=sampleH-squish+stretch;const bulge=squish*0.4;
+
+  pCtx.fillStyle=C.sampleLight;
+  pCtx.beginPath();pCtx.ellipse(w/2,sTop+sH/2,sampleW/2+bulge,sH/2,0,0,Math.PI*2);pCtx.fill();
+  pCtx.fillStyle=C.sample;pCtx.globalAlpha=0.7;
+  pCtx.beginPath();pCtx.ellipse(w/2,sTop+sH/2,sampleW/2+bulge,sH/2,0,0,Math.PI*2);pCtx.fill();
+  pCtx.globalAlpha=1;
+
+  const probeBottom=sampleBaseY-10+squish+stretch;
+  pCtx.fillStyle=C.probe;
+  pCtx.fillRect(w/2-3,0,6,probeBottom-probeH+10);
+  pCtx.fillRect(w/2-probeW/2,probeBottom-probeH,probeW,probeH);
+
+  if(compression<-0.02){
+    pCtx.strokeStyle=C.adh;pCtx.lineWidth=1;pCtx.setLineDash([2,2]);
+    for(let i=0;i<3;i++){const y=probeBottom+(i+1)*(-stretch*sampleH*0.3/3);
+      pCtx.beginPath();pCtx.moveTo(w/2-15,y);pCtx.lineTo(w/2+15,y);pCtx.stroke();}
+    pCtx.setLineDash([]);
+  }
+
+  const forceVal=curve.reduce((best,p)=>Math.abs(p.t-animT)<Math.abs(best.t-animT)?p:best,curve[0]).f;
+  pCtx.fillStyle=C.text;pCtx.font='11px sans-serif';pCtx.textAlign='center';
+  pCtx.fillText('F = '+Math.round(forceVal)+' g',w/2,h-12);
+}
+
+function draw(){drawChart();drawProbe();timeLabel.textContent=animT.toFixed(1)+' s / 8.0 s';phaseLabel.textContent=getPhase(animT);
+  const info=getActiveInfo(animT);
+  infoBox.innerHTML=info?`<span style="color:${info.color};font-weight:500">${info.label}</span> — ${info.desc}`:'Press Play to start the Texture Profile Analysis animation.';
+}
+
+function tick(ts){if(!playing)return;if(!lastTs)lastTs=ts;const dt=(ts-lastTs)/1000;lastTs=ts;
+  animT+=dt*speed*(8/30);if(animT>=8){animT=8;playing=false;playBtn.textContent='Replay';}
+  draw();if(playing)rafId=requestAnimationFrame(tick);}
+
+playBtn.onclick=()=>{if(animT>=8)animT=0;playing=!playing;playBtn.textContent=playing?'Pause':'Play';
+  if(playing){lastTs=null;rafId=requestAnimationFrame(tick);}};
+resetBtn.onclick=()=>{playing=false;animT=0;lastTs=null;playBtn.textContent='Play';draw();};
+speedSlider.oninput=()=>{speed=parseFloat(speedSlider.value);speedLabel.textContent=speed+'x';};
+draw();
+</script>
+</body>
+</html>
